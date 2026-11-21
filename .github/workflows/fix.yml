@@ -1,0 +1,18 @@
+name: FixBuild
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Build Windows installer
+        run: ./build-windows.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer
+          path: dist/CloudMus-*-x86_64-Setup.exe
+          retention-days: 14
