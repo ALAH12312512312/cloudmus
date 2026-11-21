@@ -139,7 +139,7 @@ public:
 
         positionTimer_ = new QTimer(owner_);
         positionTimer_->setInterval(5000);
-        QObject::connect(positionTimer_, &QTimer::timeout, owner_, [this]() { updateTimelinePosition(); });
+        QObject::connect(positionTimer_, &QTimer::timeout, owner_, this { updateTimelinePosition(); pushMusicMetadata(); });
 
         QObject::connect(&playback_, &Playback::PlaybackController::trackChanged, owner_,
             [this](const Track&, const QString&) { updateTrack(); });
@@ -374,6 +374,39 @@ private:
 
     // --- our state pushed out to the system -----------------------------
 
+    // Windows 10: Update() with a thumbnail can drop music properties set
+    // earlier; re-apply them after every thumbnail push and on the timer.
+    void pushMusicMetadata()
+    {
+        if (!displayUpdater_ || !playback_.hasCurrentTrack())
+            return;
+        const Track& track = playback_.currentTrack();
+        ComPtr<Abi::IMusicDisplayProperties> music;
+        if (FAILED(displayUpdater_->get_MusicProperties(music.GetAddressOf())) || !music)
+            return;
+        HStringHolder title(track.title);
+        music->put_Title(title.get());
+        QString artists;
+        for (int i = 0; i < track.artists.size(); ++i) {
+            if (i > 0)
+                artists += QStringLiteral(", ");
+            artists += track.artists[i].name;
+        }
+        HStringHolder artist(artists);
+        music->put_Artist(artist.get());
+        if (track.album.has_value()) {
+            ComPtr<Abi::IMusicDisplayProperties2> music2;
+            if (SUCCEEDED(music->QueryInterface(
+                    Abi::IID_IMusicDisplayProperties2, reinterpret_cast<void**>(music2.GetAddressOf())))
+                && music2) {
+                HStringHolder albumTitle(track.album->title);
+                music2->put_AlbumTitle(albumTitle.get());
+            }
+        }
+        displayUpdater_->Update();
+        qInfo() << "Smtc: metadata republished:" << track.title << "/" << artists;
+    }
+
     void updateTrack()
     {
         if (!displayUpdater_)
@@ -563,6 +596,7 @@ private:
         if (cover.isNull()) {
             displayUpdater_->put_Thumbnail(nullptr);
             displayUpdater_->Update();
+            pushMusicMetadata();
             return;
         }
 
@@ -601,6 +635,7 @@ private:
 
         displayUpdater_->put_Thumbnail(streamRef.Get());
         displayUpdater_->Update();
+        pushMusicMetadata();
     }
 
     static constexpr QSize kCoverSize { 300, 300 };
