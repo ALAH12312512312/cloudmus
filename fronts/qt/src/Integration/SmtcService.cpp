@@ -144,7 +144,7 @@ public:
         QObject::connect(&playback_, &Playback::PlaybackController::trackChanged, owner_,
             this { updateTrack(); });
         QObject::connect(
-            &playback_, &Playback::PlaybackController::currentTrackAvailabilityChanged, owner_, this {
+            &playback_, &Playback::PlaybackController::currentTrackAvailabilityChanged, owner_, this (bool available) {
                 if (!available)
                     updateTrack();
             });
@@ -157,7 +157,7 @@ public:
         QObject::connect(
             &playback_, &Playback::PlaybackController::playModeChanged, owner_, this { updatePlayMode(); });
         QObject::connect(
-            &covers_, &Covers::CoverArtCache::pixmapReady, owner_, this { onCoverReady(url); });
+            &covers_, &Covers::CoverArtCache::pixmapReady, owner_, this (const QString& url) { onCoverReady(url); });
 
         if (playback_.hasCurrentTrack())
             updateTrack();
@@ -270,7 +270,7 @@ private:
     void registerHandlers()
     {
         auto* buttonHandler = new TypedHandler<Abi::ISystemMediaTransportControlsButtonPressedEventArgs>(
-            Abi::IID_ButtonPressedHandler, this {
+            Abi::IID_ButtonPressedHandler, this (Abi::ISystemMediaTransportControlsButtonPressedEventArgs* args) {
                 Abi::SystemMediaTransportControlsButton button { };
                 if (FAILED(args->get_Button(&button)))
                     return;
@@ -283,7 +283,7 @@ private:
             return;
 
         auto* positionHandler = new TypedHandler<Abi::IPlaybackPositionChangeRequestedEventArgs>(
-            Abi::IID_PlaybackPositionChangeRequestedHandler, this {
+            Abi::IID_PlaybackPositionChangeRequestedHandler, this (Abi::IPlaybackPositionChangeRequestedEventArgs* args) {
                 Abi::TimeSpan requested { };
                 if (FAILED(args->get_RequestedPlaybackPosition(&requested)))
                     return;
@@ -295,7 +295,7 @@ private:
         positionHandler->Release();
 
         auto* shuffleHandler = new TypedHandler<Abi::IShuffleEnabledChangeRequestedEventArgs>(
-            Abi::IID_ShuffleEnabledChangeRequestedHandler, this {
+            Abi::IID_ShuffleEnabledChangeRequestedHandler, this (Abi::IShuffleEnabledChangeRequestedEventArgs* args) {
                 boolean requested = FALSE;
                 if (FAILED(args->get_RequestedShuffleEnabled(&requested)))
                     return;
@@ -306,7 +306,7 @@ private:
         shuffleHandler->Release();
 
         auto* repeatHandler = new TypedHandler<Abi::IAutoRepeatModeChangeRequestedEventArgs>(
-            Abi::IID_AutoRepeatModeChangeRequestedHandler, this {
+            Abi::IID_AutoRepeatModeChangeRequestedHandler, this (Abi::IAutoRepeatModeChangeRequestedEventArgs* args) {
                 Abi::MediaPlaybackAutoRepeatMode requested { };
                 if (FAILED(args->get_RequestedAutoRepeatMode(&requested)))
                     return;
