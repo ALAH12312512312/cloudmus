@@ -333,3 +333,345 @@ private:
             case Abi::SystemMediaTransportControlsButton::Stop:
                 // No dedicated "stop" concept in PlaybackController's MPRIS
                 // sense either — pausing is the closest equivalent, same
+                // reasoning as MprisPlayerAdaptor::Stop().
+                if (playback_.isPlaying())
+                    playback_.togglePause();
+                break;
+            case Abi::SystemMediaTransportControlsButton::Next:
+                playback_.next();
+                break;
+            case Abi::SystemMediaTransportControlsButton::Previous:
+                playback_.previous();
+                break;
+            default:
+                break;
+        }
+    }
+
+    void onSeekRequested(qint64 positionMs)
+    {
+        if (!playback_.hasCurrentTrack() || playback_.currentTrack().durationMs <= 0)
+            return;
+        playback_.seek(std::clamp<qint64>(positionMs, 0, playback_.currentTrack().durationMs));
+    }
+
+    void onRepeatModeRequested(Abi::MediaPlaybackAutoRepeatMode mode)
+    {
+        switch (mode) {
+            case Abi::MediaPlaybackAutoRepeatMode::List:
+                playback_.setRepeatMode(Playback::RepeatMode::All);
+                break;
+            case Abi::MediaPlaybackAutoRepeatMode::Track:
+                playback_.setRepeatMode(Playback::RepeatMode::One);
+                break;
+            case Abi::MediaPlaybackAutoRepeatMode::None:
+                playback_.setRepeatMode(Playback::RepeatMode::Off);
+                break;
+        }
+    }
+
+    // --- our state pushed out to the system -----------------------------
+
+    // Windows 10: a DisplayUpdater::Update() that carries a thumbnail can
+    // drop the music properties set before it, leaving the flyout with
+    // cover art but no title/artist. Re-apply them after every thumbnail
+    // push and on the position timer, so the names always survive.
+    void pushMusicMetadata()
+    {
+        if (!displayUpdater_ || !playback_.hasCurrentTrack())
+            return;
+        const Track& track = playback_.currentTrack();
+        ComPtr<Abi::IMusicDisplayProperties> music;
+        if (FAILED(displayUpdater_->get_MusicProperties(music.GetAddressOf())) || !music)
+            return;
+        HStringHolder title(track.title);
+        music->put_Title(title.get());
+        QString artists;
+        for (int i = 0; i < track.artists.size(); ++i) {
+            if (i > 0)
+                artists += QStringLiteral(", ");
+            artists += track.artists[i].name;
+        }
+        HStringHolder artist(artists);
+        music->put_Artist(artist.get());
+        if (track.album.has_value()) {
+            ComPtr<Abi::IMusicDisplayProperties2> music2;
+            if (SUCCEEDED(music->QueryInterface(
+                    Abi::IID_IMusicDisplayProperties2, reinterpret_cast<void**>(music2.GetAddressOf())))
+                && music2) {
+                HStringHolder albumTitle(track.album->title);
+                music2->put_AlbumTitle(albumTitle.get());
+            }
+        }
+        displayUpdater_->Update();
+    }
+
+    void updateTrack()
+    {
+        if (!displayUpdater_)
+            return;
+        if (!playback_.hasCurrentTrack()) {
+            displayUpdater_->ClearAll();
+            smtc_->put_PlaybackStatus(Abi::MediaPlaybackStatus::Closed);
+            displayUpdater_->Update();
+            pendingCoverUrl_.clear();
+            updateTimelineExtent();
+            return;
+        }
+
+        const Track& track = playback_.currentTrack();
+        ComPtr<Abi::IMusicDisplayProperties> music;
+        if (SUCCEEDED(displayUpdater_->get_MusicProperties(music.GetAddressOf())) && music) {
+            HStringHolder title(track.title);
+            music->put_Title(title.get());
+
+            QString artists;
+            for (int i = 0; i < track.artists.size(); ++i) {
+                if (i > 0)
+                    artists += QStringLiteral(", ");
+                artists += track.artists[i].name;
+            }
+            HStringHolder artist(artists);
+            music->put_Artist(artist.get());
+
+            if (track.album.has_value()) {
+                ComPtr<Abi::IMusicDisplayProperties2> music2;
+                if (SUCCEEDED(music->QueryInterface(
+                        Abi::IID_IMusicDisplayProperties2, reinterpret_cast<void**>(music2.GetAddressOf())))
+                    && music2) {
+                    HStringHolder albumTitle(track.album->title);
+                    music2->put_AlbumTitle(albumTitle.get());
+                }
+            }
+        }
+
+        updateTimelineExtent();
+        displayUpdater_->Update();
+        updatePlaying();
+
+        QString coverUrl = track.coverUrl.value_or(QString());
+        if (coverUrl.isEmpty() && track.album.has_value())
+            coverUrl = track.album->coverUrl.value_or(QString());
+        setCover(coverUrl);
+    }
+
+    void updatePlaying()
+    {
+        if (!smtc_)
+            return;
+        const bool hasTrack = playback_.hasCurrentTrack();
+        smtc_->put_PlaybackStatus(!hasTrack
+                ? Abi::MediaPlaybackStatus::Closed
+                : (playback_.isPlaying() ? Abi::MediaPlaybackStatus::Playing : Abi::MediaPlaybackStatus::Paused));
+        if (positionTimer_) {
+            if (hasTrack && playback_.isPlaying())
+                positionTimer_->start();
+            else
+                positionTimer_->stop();
+        }
+    }
+
+    void updatePlayMode()
+    {
+        if (!smtc2_)
+            return;
+        smtc2_->put_ShuffleEnabled(playback_.shuffleActive() ? TRUE : FALSE);
+        Abi::MediaPlaybackAutoRepeatMode mode = Abi::MediaPlaybackAutoRepeatMode::None;
+        switch (playback_.effectiveRepeatMode()) {
+            case Playback::RepeatMode::All:
+                mode = Abi::MediaPlaybackAutoRepeatMode::List;
+                break;
+            case Playback::RepeatMode::One:
+                mode = Abi::MediaPlaybackAutoRepeatMode::Track;
+                break;
+            case Playback::RepeatMode::Off:
+                break;
+        }
+        smtc2_->put_AutoRepeatMode(mode);
+    }
+
+    bool ensureTimelineProps()
+    {
+        if (timelineProps_)
+            return true;
+        HStringHolder className(QStringLiteral("Windows.Media.SystemMediaTransportControlsTimelineProperties"));
+        ComPtr<IInspectable> instance;
+        const HRESULT hr = RoActivateInstance(className.get(), instance.GetAddressOf());
+        if (FAILED(hr) || !instance) {
+            qWarning() << "Smtc: RoActivateInstance(TimelineProperties) failed" << Qt::hex << hr;
+            return false;
+        }
+        const HRESULT qi = instance->QueryInterface(Abi::IID_ISystemMediaTransportControlsTimelineProperties,
+            reinterpret_cast<void**>(timelineProps_.GetAddressOf()));
+        if (FAILED(qi) || !timelineProps_) {
+            qWarning() << "Smtc: no ISystemMediaTransportControlsTimelineProperties" << Qt::hex << qi;
+            return false;
+        }
+        return true;
+    }
+
+    // Start/end/min/max-seek — pushed on track change (or cleared when
+    // there's no seekable duration, e.g. a radio track).
+    void updateTimelineExtent()
+    {
+        if (!smtc2_ || !ensureTimelineProps())
+            return;
+        const bool seekable = playback_.hasCurrentTrack() && playback_.currentTrack().durationMs > 0;
+        const Abi::TimeSpan durationTicks { seekable ? qint64(playback_.currentTrack().durationMs) * 10000 : 0 };
+        timelineProps_->put_StartTime(Abi::TimeSpan { 0 });
+        timelineProps_->put_MinSeekTime(Abi::TimeSpan { 0 });
+        timelineProps_->put_EndTime(durationTicks);
+        timelineProps_->put_MaxSeekTime(durationTicks);
+        timelineProps_->put_Position(Abi::TimeSpan { seekable ? playback_.positionMs() * 10000 : 0 });
+        smtc2_->UpdateTimelineProperties(timelineProps_.Get());
+    }
+
+    // Position alone — on seeks/play-pause, and every 5s while playing
+    // (Microsoft's own guidance: don't push more often, the flyout
+    // extrapolates between updates from PlaybackStatus/rate).
+    void updateTimelinePosition()
+    {
+        if (!smtc2_ || !timelineProps_ || !playback_.hasCurrentTrack() || playback_.currentTrack().durationMs <= 0)
+            return;
+        timelineProps_->put_Position(Abi::TimeSpan { playback_.positionMs() * 10000 });
+        smtc2_->UpdateTimelineProperties(timelineProps_.Get());
+        pushMusicMetadata();
+    }
+
+    // --- cover art ---------------------------------------------------
+
+    void setCover(const QString& url)
+    {
+        if (url.isEmpty()) {
+            pendingCoverUrl_.clear();
+            pushThumbnail(QPixmap());
+            return;
+        }
+        const QPixmap cover = covers_.pixmap(url, kCoverSize);
+        if (!cover.isNull()) {
+            pendingCoverUrl_.clear();
+            pushThumbnail(cover);
+            return;
+        }
+        // Still loading; onCoverReady() below picks it up once
+        // CoverArtCache emits pixmapReady() for this url — the same wait
+        // pattern main.cpp uses for the tray's track notification.
+        pendingCoverUrl_ = url;
+    }
+
+    void onCoverReady(const QString& url)
+    {
+        if (pendingCoverUrl_.isEmpty() || url != pendingCoverUrl_)
+            return;
+        const QPixmap cover = covers_.pixmap(url, kCoverSize);
+        if (cover.isNull())
+            return; // another size of the same url landed; ours is still coming
+        pendingCoverUrl_.clear();
+        pushThumbnail(cover);
+    }
+
+    bool ensureStreamRefFactory()
+    {
+        if (streamRefFactory_)
+            return true;
+        HStringHolder className(QStringLiteral("Windows.Storage.Streams.RandomAccessStreamReference"));
+        const HRESULT hr = RoGetActivationFactory(className.get(), Abi::IID_IRandomAccessStreamReferenceStatics,
+            reinterpret_cast<void**>(streamRefFactory_.GetAddressOf()));
+        if (FAILED(hr) || !streamRefFactory_) {
+            qWarning() << "Smtc: RoGetActivationFactory(RandomAccessStreamReference) failed" << Qt::hex << hr;
+            return false;
+        }
+        return true;
+    }
+
+    // Encodes `cover` to PNG in memory and hands it to SMTC via the classic
+    // IStream -> WinRT IRandomAccessStream -> IRandomAccessStreamReference
+    // chain — never an http(s) URL: the cover may have come through a
+    // source's own proxy (Net::ProxyRouting) or be a local file, neither of
+    // which Windows itself could fetch.
+    void pushThumbnail(const QPixmap& cover)
+    {
+        if (!displayUpdater_)
+            return;
+        if (cover.isNull()) {
+            displayUpdater_->put_Thumbnail(nullptr);
+            displayUpdater_->Update();
+            pushMusicMetadata();
+            return;
+        }
+
+        QByteArray png;
+        {
+            QBuffer buffer(&png);
+            buffer.open(QIODevice::WriteOnly);
+            cover.save(&buffer, "PNG");
+        }
+        if (png.isEmpty())
+            return;
+
+        ComPtr<IStream> stream;
+        stream.Attach(SHCreateMemStream(reinterpret_cast<const BYTE*>(png.constData()), static_cast<UINT>(png.size())));
+        if (!stream) {
+            qWarning() << "Smtc: SHCreateMemStream failed";
+            return;
+        }
+
+        ComPtr<IUnknown> randomAccessStream;
+        HRESULT hr = CreateRandomAccessStreamOverStream(stream.Get(), BSOS_DEFAULT, Abi::IID_IRandomAccessStream,
+            reinterpret_cast<void**>(randomAccessStream.GetAddressOf()));
+        if (FAILED(hr) || !randomAccessStream) {
+            qWarning() << "Smtc: CreateRandomAccessStreamOverStream failed" << Qt::hex << hr;
+            return;
+        }
+
+        if (!ensureStreamRefFactory())
+            return;
+        ComPtr<IUnknown> streamRef;
+        hr = streamRefFactory_->CreateFromStream(randomAccessStream.Get(), streamRef.GetAddressOf());
+        if (FAILED(hr) || !streamRef) {
+            qWarning() << "Smtc: CreateFromStream failed" << Qt::hex << hr;
+            return;
+        }
+
+        displayUpdater_->put_Thumbnail(streamRef.Get());
+        displayUpdater_->Update();
+        pushMusicMetadata();
+    }
+
+    static constexpr QSize kCoverSize { 300, 300 };
+
+    Playback::PlaybackController& playback_;
+    Covers::CoverArtCache& covers_;
+    SmtcService* owner_;
+
+    bool classRegistered_ = false;
+    HWND hwnd_ = nullptr;
+
+    ComPtr<Abi::ISystemMediaTransportControls> smtc_;
+    ComPtr<Abi::ISystemMediaTransportControls2> smtc2_;
+    ComPtr<Abi::ISystemMediaTransportControlsDisplayUpdater> displayUpdater_;
+    ComPtr<Abi::ISystemMediaTransportControlsTimelineProperties> timelineProps_;
+    ComPtr<Abi::IRandomAccessStreamReferenceStatics> streamRefFactory_;
+
+    Abi::EventRegistrationToken buttonToken_ { };
+    Abi::EventRegistrationToken positionToken_ { };
+    Abi::EventRegistrationToken shuffleToken_ { };
+    Abi::EventRegistrationToken repeatToken_ { };
+    bool buttonHandlerOk_ = false;
+    bool positionHandlerOk_ = false;
+    bool shuffleHandlerOk_ = false;
+    bool repeatHandlerOk_ = false;
+
+    QTimer* positionTimer_ = nullptr;
+    QString pendingCoverUrl_;
+};
+
+SmtcService::SmtcService(Playback::PlaybackController& playback, Covers::CoverArtCache& covers, QObject* parent)
+    : QObject(parent)
+    , impl_(std::make_unique<Impl>(playback, covers, this))
+{
+}
+
+SmtcService::~SmtcService() = default;
+
+} // namespace Integration
