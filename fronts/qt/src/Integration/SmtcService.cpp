@@ -139,25 +139,25 @@ public:
 
         positionTimer_ = new QTimer(owner_);
         positionTimer_->setInterval(5000);
-        QObject::connect(positionTimer_, &QTimer::timeout, owner_, this { updateTimelinePosition(); });
+        QObject::connect(positionTimer_, &QTimer::timeout, owner_, [this]() { updateTimelinePosition(); });
 
         QObject::connect(&playback_, &Playback::PlaybackController::trackChanged, owner_,
-            this { updateTrack(); });
+            [this](const Track&, const QString&) { updateTrack(); });
         QObject::connect(
-            &playback_, &Playback::PlaybackController::currentTrackAvailabilityChanged, owner_, this (bool available) {
+            &playback_, &Playback::PlaybackController::currentTrackAvailabilityChanged, owner_, [this](bool available) {
                 if (!available)
                     updateTrack();
             });
-        QObject::connect(&playback_, &Playback::PlaybackController::playingChanged, owner_, this {
+        QObject::connect(&playback_, &Playback::PlaybackController::playingChanged, owner_, [this](bool) {
             updatePlaying();
             updateTimelinePosition();
         });
         QObject::connect(
-            &playback_, &Playback::PlaybackController::seeked, owner_, this { updateTimelinePosition(); });
+            &playback_, &Playback::PlaybackController::seeked, owner_, [this](qint64) { updateTimelinePosition(); });
         QObject::connect(
-            &playback_, &Playback::PlaybackController::playModeChanged, owner_, this { updatePlayMode(); });
+            &playback_, &Playback::PlaybackController::playModeChanged, owner_, [this]() { updatePlayMode(); });
         QObject::connect(
-            &covers_, &Covers::CoverArtCache::pixmapReady, owner_, this (const QString& url) { onCoverReady(url); });
+            &covers_, &Covers::CoverArtCache::pixmapReady, owner_, [this](const QString& url) { onCoverReady(url); });
 
         if (playback_.hasCurrentTrack())
             updateTrack();
@@ -270,11 +270,11 @@ private:
     void registerHandlers()
     {
         auto* buttonHandler = new TypedHandler<Abi::ISystemMediaTransportControlsButtonPressedEventArgs>(
-            Abi::IID_ButtonPressedHandler, this (Abi::ISystemMediaTransportControlsButtonPressedEventArgs* args) {
+            Abi::IID_ButtonPressedHandler, [this](Abi::ISystemMediaTransportControlsButtonPressedEventArgs* args) {
                 Abi::SystemMediaTransportControlsButton button { };
                 if (FAILED(args->get_Button(&button)))
                     return;
-                QMetaObject::invokeMethod(owner_, this, button { onButtonPressed(button); }, Qt::QueuedConnection);
+                QMetaObject::invokeMethod(owner_, [this, button]() { onButtonPressed(button); }, Qt::QueuedConnection);
             });
         buttonHandlerOk_ = SUCCEEDED(smtc_->add_ButtonPressed(buttonHandler, &buttonToken_));
         buttonHandler->Release(); // add_ButtonPressed() AddRef'd its own copy if it wants one
@@ -283,34 +283,36 @@ private:
             return;
 
         auto* positionHandler = new TypedHandler<Abi::IPlaybackPositionChangeRequestedEventArgs>(
-            Abi::IID_PlaybackPositionChangeRequestedHandler, this (Abi::IPlaybackPositionChangeRequestedEventArgs* args) {
+            Abi::IID_PlaybackPositionChangeRequestedHandler,
+            [this](Abi::IPlaybackPositionChangeRequestedEventArgs* args) {
                 Abi::TimeSpan requested { };
                 if (FAILED(args->get_RequestedPlaybackPosition(&requested)))
                     return;
                 const qint64 positionMs = requested.Duration / 10000;
                 QMetaObject::invokeMethod(
-                    owner_, this, positionMs { onSeekRequested(positionMs); }, Qt::QueuedConnection);
+                    owner_, [this, positionMs]() { onSeekRequested(positionMs); }, Qt::QueuedConnection);
             });
         positionHandlerOk_ = SUCCEEDED(smtc2_->add_PlaybackPositionChangeRequested(positionHandler, &positionToken_));
         positionHandler->Release();
 
         auto* shuffleHandler = new TypedHandler<Abi::IShuffleEnabledChangeRequestedEventArgs>(
-            Abi::IID_ShuffleEnabledChangeRequestedHandler, this (Abi::IShuffleEnabledChangeRequestedEventArgs* args) {
+            Abi::IID_ShuffleEnabledChangeRequestedHandler, [this](Abi::IShuffleEnabledChangeRequestedEventArgs* args) {
                 boolean requested = FALSE;
                 if (FAILED(args->get_RequestedShuffleEnabled(&requested)))
                     return;
                 const bool on = requested != FALSE;
-                QMetaObject::invokeMethod(owner_, this, on { playback_.setShuffle(on); }, Qt::QueuedConnection);
+                QMetaObject::invokeMethod(owner_, [this, on]() { playback_.setShuffle(on); }, Qt::QueuedConnection);
             });
         shuffleHandlerOk_ = SUCCEEDED(smtc2_->add_ShuffleEnabledChangeRequested(shuffleHandler, &shuffleToken_));
         shuffleHandler->Release();
 
         auto* repeatHandler = new TypedHandler<Abi::IAutoRepeatModeChangeRequestedEventArgs>(
-            Abi::IID_AutoRepeatModeChangeRequestedHandler, this (Abi::IAutoRepeatModeChangeRequestedEventArgs* args) {
+            Abi::IID_AutoRepeatModeChangeRequestedHandler, [this](Abi::IAutoRepeatModeChangeRequestedEventArgs* args) {
                 Abi::MediaPlaybackAutoRepeatMode requested { };
                 if (FAILED(args->get_RequestedAutoRepeatMode(&requested)))
                     return;
-                QMetaObject::invokeMethod(owner_, this, requested { onRepeatModeRequested(requested); }, Qt::QueuedConnection);
+                QMetaObject::invokeMethod(
+                    owner_, [this, requested]() { onRepeatModeRequested(requested); }, Qt::QueuedConnection);
             });
         repeatHandlerOk_ = SUCCEEDED(smtc2_->add_AutoRepeatModeChangeRequested(repeatHandler, &repeatToken_));
         repeatHandler->Release();
